@@ -1,0 +1,12 @@
+set shell := ["bash", "-lc"]
+
+default: run
+
+setup:
+	uv pip install -e .
+
+run:
+	uv run streamlit run main.py
+
+test:
+	pytest
