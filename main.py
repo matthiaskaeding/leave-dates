@@ -37,6 +37,27 @@ class LeaveRecord:
     duration_weeks: float
 
 
+def duration_weeks_to_days(duration_weeks: float) -> int:
+    return max(int(round(duration_weeks * 7)), 0)
+
+
+def compute_inclusive_end(start: date, duration_weeks: float) -> date:
+    total_days = duration_weeks_to_days(duration_weeks)
+    if total_days <= 0:
+        return start
+    return start + timedelta(days=total_days - 1)
+
+
+def rerun_app() -> None:
+    rerun_fn = getattr(st, "rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+    else:
+        legacy = getattr(st, "experimental_rerun", None)
+        if callable(legacy):
+            legacy()
+
+
 def interval_from_dict(data: Dict[str, Any]) -> IntervalInput:
     start = date.fromisoformat(data["start_date"])
     duration = float(data.get("duration_weeks", 0))
@@ -94,25 +115,25 @@ def collect_interval_inputs(
     saved_extras = (
         saved_intervals[1:] if saved_intervals and len(saved_intervals) > 1 else []
     )
-    state_key = f"{key_prefix}-extra-count"
-    seeded_key = f"{state_key}-seeded"
-    initial_extra = max(1, len(saved_extras))
-    if seeded_key not in st.session_state:
-        st.session_state[state_key] = initial_extra
-        st.session_state[seeded_key] = True
+    state_key = f"{key_prefix}-blocks"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = [
+            saved_extras[idx] if idx < len(saved_extras) else None
+            for idx in range(max(1, len(saved_extras)))
+        ]
+    blocks_state: List[Optional[IntervalInput]] = st.session_state[state_key]
     if st.button("Add another block", key=f"{key_prefix}-add-interval"):
-        st.session_state[state_key] += 1
-    extra_count = st.session_state[state_key]
+        blocks_state.append(None)
+    st.session_state[state_key] = blocks_state
 
     previous_start = birth_date
     previous_duration = DEFAULT_INTERVAL_WEEKS
-    for idx in range(extra_count):
+    for idx, saved_interval in enumerate(blocks_state):
         interval_number = idx + 2
-        saved_interval = saved_extras[idx] if idx < len(saved_extras) else None
         name_default = (
             saved_interval.name if saved_interval and saved_interval.name else f"Block {interval_number}"
         )
-        cols = st.columns((1, 1))
+        cols = st.columns((1.4, 1))
         with cols[0]:
             block_name = (
                 st.text_input(
@@ -123,12 +144,12 @@ def collect_interval_inputs(
                 ).strip()
                 or f"Block {interval_number}"
             )
-        default_start = (
-            saved_interval.start_date
-            if saved_interval
-            else previous_start + timedelta(weeks=previous_duration)
-        )
         with cols[1]:
+            default_start = (
+                saved_interval.start_date
+                if saved_interval
+                else previous_start + timedelta(weeks=previous_duration)
+            )
             interval_start = st.date_input(
                 f"Block {interval_number} start date",
                 value=default_start,
@@ -165,10 +186,12 @@ def collect_interval_inputs(
                 interval_duration = float(duration_value)
             else:
                 saved_end = (
-                    saved_interval.start_date
-                    + timedelta(weeks=saved_interval.duration_weeks)
+                    compute_inclusive_end(saved_interval.start_date, saved_interval.duration_weeks)
                     if saved_interval
-                    else interval_start + timedelta(weeks=default_duration)
+                    else compute_inclusive_end(
+                        interval_start,
+                        default_duration or DEFAULT_INTERVAL_WEEKS,
+                    )
                 )
                 interval_end = st.date_input(
                     "End date",
@@ -176,7 +199,16 @@ def collect_interval_inputs(
                     min_value=interval_start,
                     key=f"{key_prefix}-end-date-{interval_number}",
                 )
-                interval_duration = max((interval_end - interval_start).days / 7, 0.0)
+                interval_duration = max(
+                    ((interval_end - interval_start).days + 1) / 7, 0.0
+                )
+        if len(blocks_state) > 1:
+            if st.button(
+                f"Delete block {interval_number}",
+                key=f"{key_prefix}-delete-{interval_number}",
+            ):
+                del blocks_state[idx]
+                rerun_app()
         intervals.append(
             IntervalInput(interval_start, interval_duration, block_name)
         )
@@ -193,7 +225,7 @@ def build_records(
         if interval.duration_weeks <= 0:
             continue
         start = interval.start_date
-        end = start + timedelta(days=interval.duration_weeks * 7)
+        end = compute_inclusive_end(start, interval.duration_weeks)
         label_name = interval.name or f"Block {idx}"
         label = f"{parent_label} {label_name}"
         records.append(
@@ -216,8 +248,9 @@ def build_overlap_records(
         for f in father:
             overlap_start = max(m.start, f.start)
             overlap_end = min(m.end, f.end)
-            if overlap_start < overlap_end:
-                duration_weeks = (overlap_end - overlap_start).days / 7
+            if overlap_start <= overlap_end:
+                duration_days = (overlap_end - overlap_start).days + 1
+                duration_weeks = duration_days / 7
                 overlaps.append(
                     LeaveRecord(
                         parent="Overlap",
@@ -241,12 +274,15 @@ def render_chart(records: List[LeaveRecord]) -> None:
                 "parent": record.parent,
                 "label": record.label,
                 "start": record.start,
-                "end": record.end,
+                "end_inclusive": record.end,
+                "end_exclusive": record.end + timedelta(days=1),
                 "duration_weeks": record.duration_weeks,
             }
             for record in records
         ]
     )
+    df["weeks"] = df["duration_weeks"].apply(lambda value: round(value, 1))
+    df["days"] = df["duration_weeks"].apply(duration_weeks_to_days)
 
     parent_order = ["Mother", "Father", "Overlap"]
     used_parents = [p for p in parent_order if p in df["parent"].unique()]
@@ -260,22 +296,23 @@ def render_chart(records: List[LeaveRecord]) -> None:
         .mark_bar(cornerRadius=4)
         .encode(
             x=alt.X("start:T", title="Calendar date"),
-            x2="end:T",
+            x2="end_exclusive:T",
             y=alt.Y("parent:N", sort=used_parents, title=""),
             color=alt.Color("parent:N", scale=color_scale, legend=alt.Legend(title="")),
-            tooltip=["label", "start", "end", "duration_weeks"],
+            tooltip=[
+                alt.Tooltip("label:N", title="Block"),
+                alt.Tooltip("start:T", title="Start"),
+                alt.Tooltip("end_inclusive:T", title="End"),
+                alt.Tooltip("weeks:Q", title="Weeks"),
+                alt.Tooltip("days:Q", title="Days"),
+            ],
         )
         .properties(height=180)
     )
     st.altair_chart(chart, use_container_width=True)
-    table_df = df[["label", "start", "end", "duration_weeks"]].copy()
-    table_df["weeks"] = table_df["duration_weeks"].apply(
-        lambda value: round(value, 1)
+    table_df = df[["label", "start", "end_inclusive", "weeks", "days"]].rename(
+        columns={"end_inclusive": "end"}
     )
-    table_df["days"] = table_df["duration_weeks"].apply(
-        lambda value: round(value * 7)
-    )
-    table_df = table_df.drop(columns=["duration_weeks"])
     st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
@@ -293,6 +330,7 @@ def main() -> None:
     if saved_plan:
         st.info("Loaded your previously saved plan from .streamlit/last_plan.json.")
     st.divider()
+
     mother_intervals = collect_interval_inputs(
         "Mother's leave plan",
         "mother",
