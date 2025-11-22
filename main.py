@@ -71,10 +71,19 @@ def load_saved_plan() -> Optional[Dict[str, Any]]:
     try:
         raw = json.loads(PLAN_PATH.read_text())
         birth_date = date.fromisoformat(raw["birth_date"])
+
+        def parse_intervals(*keys: str) -> List[IntervalInput]:
+            for key in keys:
+                if key in raw:
+                    return [interval_from_dict(item) for item in raw.get(key, [])]
+            return []
+
         return {
             "birth_date": birth_date,
-            "mother": [interval_from_dict(item) for item in raw.get("mother", [])],
-            "father": [interval_from_dict(item) for item in raw.get("father", [])],
+            "caregiver-a": parse_intervals("caregiver-a", "mother"),
+            "caregiver-b": parse_intervals("caregiver-b", "father"),
+            "caregiver_a_name": raw.get("caregiver_a_name", raw.get("mother_name", "Caregiver 1")),
+            "caregiver_b_name": raw.get("caregiver_b_name", raw.get("father_name", "Caregiver 2")),
         }
     except Exception:
         st.warning("Saved plan could not be read. Starting with defaults.")
@@ -83,13 +92,17 @@ def load_saved_plan() -> Optional[Dict[str, Any]]:
 
 def save_plan(
     birth_date: date,
-    mother_intervals: List[IntervalInput],
-    father_intervals: List[IntervalInput],
+    caregiver_a_intervals: List[IntervalInput],
+    caregiver_b_intervals: List[IntervalInput],
+    caregiver_a_name: str,
+    caregiver_b_name: str,
 ) -> None:
     payload = {
         "birth_date": birth_date.isoformat(),
-        "mother": [interval.to_dict() for interval in mother_intervals],
-        "father": [interval.to_dict() for interval in father_intervals],
+        "caregiver-a": [interval.to_dict() for interval in caregiver_a_intervals],
+        "caregiver-b": [interval.to_dict() for interval in caregiver_b_intervals],
+        "caregiver_a_name": caregiver_a_name,
+        "caregiver_b_name": caregiver_b_name,
     }
     PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
     PLAN_PATH.write_text(json.dumps(payload, indent=2))
@@ -104,32 +117,20 @@ def collect_interval_inputs(
     st.subheader(section_title)
     intervals: List[IntervalInput] = []
 
-    st.info(
-        f"Block 1 (Mandatory) starts on {birth_date.isoformat()} and lasts "
-        f"{DEFAULT_INTERVAL_WEEKS} weeks."
-    )
-    intervals.append(
-        IntervalInput(birth_date, DEFAULT_INTERVAL_WEEKS, "Block 1 (Mandatory)")
-    )
-
-    saved_extras = (
-        saved_intervals[1:] if saved_intervals and len(saved_intervals) > 1 else []
-    )
     state_key = f"{key_prefix}-blocks"
     if state_key not in st.session_state:
-        st.session_state[state_key] = [
-            saved_extras[idx] if idx < len(saved_extras) else None
-            for idx in range(max(1, len(saved_extras)))
-        ]
+        st.session_state[state_key] = (
+            list(saved_intervals) if saved_intervals else [None]
+        )
     blocks_state: List[Optional[IntervalInput]] = st.session_state[state_key]
-    if st.button("Add another block", key=f"{key_prefix}-add-interval"):
+    if st.button("Add block", key=f"{key_prefix}-add-block"):
         blocks_state.append(None)
     st.session_state[state_key] = blocks_state
 
     previous_start = birth_date
     previous_duration = DEFAULT_INTERVAL_WEEKS
     for idx, saved_interval in enumerate(blocks_state):
-        interval_number = idx + 2
+        interval_number = idx + 1
         name_default = (
             saved_interval.name if saved_interval and saved_interval.name else f"Block {interval_number}"
         )
@@ -145,18 +146,22 @@ def collect_interval_inputs(
                 or f"Block {interval_number}"
             )
         with cols[1]:
-            default_start = (
-                saved_interval.start_date
-                if saved_interval
-                else previous_start + timedelta(weeks=previous_duration)
-            )
+            if saved_interval:
+                default_start = saved_interval.start_date
+            elif idx == 0:
+                default_start = birth_date
+            else:
+                prev_end = compute_inclusive_end(previous_start, previous_duration)
+                default_start = prev_end + timedelta(days=1)
             interval_start = st.date_input(
                 f"Block {interval_number} start date",
                 value=default_start,
                 key=f"{key_prefix}-start-date-{interval_number}",
             )
         default_duration = (
-            saved_interval.duration_weeks if saved_interval else previous_duration
+            saved_interval.duration_weeks
+            if saved_interval and saved_interval.duration_weeks
+            else DEFAULT_INTERVAL_WEEKS
         )
         mode_index = 0
         if (
@@ -241,20 +246,20 @@ def build_records(
 
 
 def build_overlap_records(
-    mother: List[LeaveRecord], father: List[LeaveRecord]
+    caregiver_a: List[LeaveRecord], caregiver_b: List[LeaveRecord]
 ) -> List[LeaveRecord]:
     overlaps: List[LeaveRecord] = []
-    for m in mother:
-        for f in father:
-            overlap_start = max(m.start, f.start)
-            overlap_end = min(m.end, f.end)
+    for a_record in caregiver_a:
+        for b_record in caregiver_b:
+            overlap_start = max(a_record.start, b_record.start)
+            overlap_end = min(a_record.end, b_record.end)
             if overlap_start <= overlap_end:
                 duration_days = (overlap_end - overlap_start).days + 1
                 duration_weeks = duration_days / 7
                 overlaps.append(
                     LeaveRecord(
                         parent="Overlap",
-                        label=f"{m.label} ∩ {f.label}",
+                        label=f"{a_record.label} ∩ {b_record.label}",
                         start=overlap_start,
                         end=overlap_end,
                         duration_weeks=duration_weeks,
@@ -284,7 +289,7 @@ def render_chart(records: List[LeaveRecord]) -> None:
     df["weeks"] = df["duration_weeks"].apply(lambda value: round(value, 1))
     df["days"] = df["duration_weeks"].apply(duration_weeks_to_days)
 
-    parent_order = ["Mother", "Father", "Overlap"]
+    parent_order = df["parent"].unique().tolist()
     used_parents = [p for p in parent_order if p in df["parent"].unique()]
     color_scale = alt.Scale(
         domain=used_parents,
@@ -331,29 +336,47 @@ def main() -> None:
         st.info("Loaded your previously saved plan from .streamlit/last_plan.json.")
     st.divider()
 
-    mother_intervals = collect_interval_inputs(
-        "Mother's leave plan",
-        "mother",
-        birth_date,
-        saved_plan["mother"] if saved_plan else None,
+    saved_a_name = (saved_plan or {}).get("caregiver_a_name", "Caregiver 1")
+    saved_b_name = (saved_plan or {}).get("caregiver_b_name", "Caregiver 2")
+    caregiver_a_input = st.text_input("Caregiver 1 name", value=saved_a_name)
+    caregiver_b_input = st.text_input("Caregiver 2 name", value=saved_b_name)
+    caregiver_a_name = (
+        caregiver_a_input.strip() or "Caregiver 1"
+    )
+    caregiver_b_name = (
+        caregiver_b_input.strip() or "Caregiver 2"
     )
     st.divider()
-    father_intervals = collect_interval_inputs(
-        "Father's leave plan",
-        "father",
+
+    caregiver_a_intervals = collect_interval_inputs(
+        f"{caregiver_a_name} plan",
+        "caregiver-a",
         birth_date,
-        saved_plan["father"] if saved_plan else None,
+        saved_plan["caregiver-a"] if saved_plan else None,
+    )
+    st.divider()
+    caregiver_b_intervals = collect_interval_inputs(
+        f"{caregiver_b_name} plan",
+        "caregiver-b",
+        birth_date,
+        saved_plan["caregiver-b"] if saved_plan else None,
     )
 
-    mother_records = build_records("Mother", mother_intervals)
-    father_records = build_records("Father", father_intervals)
-    overlap_records = build_overlap_records(mother_records, father_records)
-    all_records = mother_records + father_records + overlap_records
+    caregiver_a_records = build_records(caregiver_a_name, caregiver_a_intervals)
+    caregiver_b_records = build_records(caregiver_b_name, caregiver_b_intervals)
+    overlap_records = build_overlap_records(caregiver_a_records, caregiver_b_records)
+    all_records = caregiver_a_records + caregiver_b_records + overlap_records
 
     st.divider()
     render_chart(all_records)
     if st.button("Save plan for next time"):
-        save_plan(birth_date, mother_intervals, father_intervals)
+        save_plan(
+            birth_date,
+            caregiver_a_intervals,
+            caregiver_b_intervals,
+            caregiver_a_name,
+            caregiver_b_name,
+        )
         st.success("Plan saved locally (.streamlit/last_plan.json).")
 
 
