@@ -23,7 +23,7 @@ class IntervalInput:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "start_date": self.start_date.isoformat(),
-            "duration_weeks": int(self.duration_weeks),
+            "duration_weeks": float(self.duration_weeks),
             "name": self.name,
         }
 
@@ -39,7 +39,7 @@ class LeaveRecord:
 
 def interval_from_dict(data: Dict[str, Any]) -> IntervalInput:
     start = date.fromisoformat(data["start_date"])
-    duration = int(data.get("duration_weeks", 0))
+    duration = float(data.get("duration_weeks", 0))
     name = data.get("name")
     return IntervalInput(start, duration, name)
 
@@ -83,88 +83,105 @@ def collect_interval_inputs(
     st.subheader(section_title)
     intervals: List[IntervalInput] = []
 
-    st.markdown(
-        f"**Interval 1**: fixed at the birth date ({birth_date.isoformat()}) "
-        f"for {DEFAULT_INTERVAL_WEEKS} weeks and always labeled **Mandatory**."
-    )
-    intervals.append(IntervalInput(birth_date, DEFAULT_INTERVAL_WEEKS, "Mandatory"))
-
-    second_default = (
-        saved_intervals[1] if saved_intervals and len(saved_intervals) > 1 else None
-    )
-    st.markdown("**Interval 2**")
-    interval_two_start = st.date_input(
-        "Start date",
-        value=second_default.start_date
-        if second_default
-        else birth_date + timedelta(weeks=DEFAULT_INTERVAL_WEEKS),
-        key=f"{key_prefix}-start-date-2",
-    )
-    second_duration_default = (
-        int(second_default.duration_weeks) if second_default else 0
-    )
-    interval_two_duration = st.number_input(
-        "Duration (weeks)",
-        min_value=0,
-        step=1,
-        value=second_duration_default,
-        key=f"{key_prefix}-duration-2",
-    )
-    interval_two_name = st.text_input(
-        "Interval 2 name (optional)",
-        value=second_default.name if second_default and second_default.name else "",
-        key=f"{key_prefix}-name-2",
-        placeholder="e.g., Part-time block",
+    st.info(
+        f"Block 1 (Mandatory) starts on {birth_date.isoformat()} and lasts "
+        f"{DEFAULT_INTERVAL_WEEKS} weeks."
     )
     intervals.append(
-        IntervalInput(
-            interval_two_start,
-            interval_two_duration,
-            interval_two_name or None,
-        )
+        IntervalInput(birth_date, DEFAULT_INTERVAL_WEEKS, "Block 1 (Mandatory)")
     )
 
-    third_default = (
-        saved_intervals[2] if saved_intervals and len(saved_intervals) > 2 else None
+    saved_extras = (
+        saved_intervals[1:] if saved_intervals and len(saved_intervals) > 1 else []
     )
-    third_duration_default = int(third_default.duration_weeks) if third_default else 0
-    add_third = st.checkbox(
-        "Add a third interval?",
-        value=bool(third_default and third_duration_default > 0),
-        key=f"{key_prefix}-third-toggle",
-        help="Leave unchecked if only two leave blocks are planned.",
-    )
-    if add_third:
-        default_third_start = (
-            third_default.start_date
-            if third_default
-            else interval_two_start + timedelta(weeks=interval_two_duration)
+    state_key = f"{key_prefix}-extra-count"
+    seeded_key = f"{state_key}-seeded"
+    initial_extra = max(1, len(saved_extras))
+    if seeded_key not in st.session_state:
+        st.session_state[state_key] = initial_extra
+        st.session_state[seeded_key] = True
+    if st.button("Add another block", key=f"{key_prefix}-add-interval"):
+        st.session_state[state_key] += 1
+    extra_count = st.session_state[state_key]
+
+    previous_start = birth_date
+    previous_duration = DEFAULT_INTERVAL_WEEKS
+    for idx in range(extra_count):
+        interval_number = idx + 2
+        saved_interval = saved_extras[idx] if idx < len(saved_extras) else None
+        name_default = (
+            saved_interval.name if saved_interval and saved_interval.name else f"Block {interval_number}"
         )
-        interval_three_start = st.date_input(
-            "Interval 3 start date",
-            value=default_third_start,
-            key=f"{key_prefix}-start-date-3",
-        )
-        interval_three_duration = st.number_input(
-            "Interval 3 duration (weeks)",
-            min_value=0,
-            step=1,
-            value=third_duration_default,
-            key=f"{key_prefix}-duration-3",
-        )
-        interval_three_name = st.text_input(
-            "Interval 3 name (optional)",
-            value=third_default.name if third_default and third_default.name else "",
-            key=f"{key_prefix}-name-3",
-            placeholder="e.g., Transition period",
-        )
-        intervals.append(
-            IntervalInput(
-                interval_three_start,
-                interval_three_duration,
-                interval_three_name or None,
+        cols = st.columns((1, 1))
+        with cols[0]:
+            block_name = (
+                st.text_input(
+                    f"Block {interval_number} label",
+                    value=name_default,
+                    key=f"{key_prefix}-name-{interval_number}",
+                    placeholder="e.g., Vacation",
+                ).strip()
+                or f"Block {interval_number}"
             )
+        default_start = (
+            saved_interval.start_date
+            if saved_interval
+            else previous_start + timedelta(weeks=previous_duration)
         )
+        with cols[1]:
+            interval_start = st.date_input(
+                f"Block {interval_number} start date",
+                value=default_start,
+                key=f"{key_prefix}-start-date-{interval_number}",
+            )
+        default_duration = (
+            saved_interval.duration_weeks if saved_interval else previous_duration
+        )
+        mode_index = 0
+        if (
+            saved_interval
+            and saved_interval.duration_weeks
+            and not float(saved_interval.duration_weeks).is_integer()
+        ):
+            mode_index = 1
+        cols = st.columns(2)
+        with cols[0]:
+            mode = st.radio(
+                "Specify by",
+                ["Duration", "End date"],
+                key=f"{key_prefix}-mode-{interval_number}",
+                horizontal=True,
+                index=mode_index,
+            )
+        with cols[1]:
+            if mode == "Duration":
+                duration_value = st.number_input(
+                    "Duration (weeks)",
+                    min_value=0,
+                    step=1,
+                    value=int(round(default_duration)) if default_duration else 0,
+                    key=f"{key_prefix}-duration-{interval_number}",
+                )
+                interval_duration = float(duration_value)
+            else:
+                saved_end = (
+                    saved_interval.start_date
+                    + timedelta(weeks=saved_interval.duration_weeks)
+                    if saved_interval
+                    else interval_start + timedelta(weeks=default_duration)
+                )
+                interval_end = st.date_input(
+                    "End date",
+                    value=saved_end,
+                    min_value=interval_start,
+                    key=f"{key_prefix}-end-date-{interval_number}",
+                )
+                interval_duration = max((interval_end - interval_start).days / 7, 0.0)
+        intervals.append(
+            IntervalInput(interval_start, interval_duration, block_name)
+        )
+        previous_start = interval_start
+        previous_duration = interval_duration
     return intervals
 
 
@@ -177,7 +194,8 @@ def build_records(
             continue
         start = interval.start_date
         end = start + timedelta(days=interval.duration_weeks * 7)
-        label = interval.name or f"{parent_label} interval {idx}"
+        label_name = interval.name or f"Block {idx}"
+        label = f"{parent_label} {label_name}"
         records.append(
             LeaveRecord(
                 parent=parent_label,
@@ -250,11 +268,15 @@ def render_chart(records: List[LeaveRecord]) -> None:
         .properties(height=180)
     )
     st.altair_chart(chart, use_container_width=True)
-    st.dataframe(
-        df[["label", "start", "end", "duration_weeks"]],
-        use_container_width=True,
-        hide_index=True,
+    table_df = df[["label", "start", "end", "duration_weeks"]].copy()
+    table_df["weeks"] = table_df["duration_weeks"].apply(
+        lambda value: round(value, 1)
     )
+    table_df["days"] = table_df["duration_weeks"].apply(
+        lambda value: round(value * 7)
+    )
+    table_df = table_df.drop(columns=["duration_weeks"])
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
 def main() -> None:

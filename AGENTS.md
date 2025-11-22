@@ -3,7 +3,7 @@
 ## Tooling Workflow
 - Manage Python dependencies exclusively with [uv](https://github.com/astral-sh/uv); run `just setup` (alias for `uv pip install -e .`) whenever `pyproject.toml` changes.
 - Use [just](https://github.com/casey/just) to run local commands so every agent follows the same workflow. Consult `justfile` before introducing new scripts.
-- Interval 1 is immutable: it always starts on the birth date, lasts 6 weeks, and must be labeled exactly “Mandatory”. Interval 2 requires user input, Interval 3 is optional, and all durations are whole weeks (later intervals may include optional labels).
+- Block 1 is immutable: it always starts on the birth date, lasts 6 weeks, and stays labeled “Block 1 (Mandatory)”. Every additional block is added via the **Add another block** button, defaults to starting after the previous block, and may be defined by a whole-week duration or a precise end date. Each block’s label defaults to “Block N”; users can edit the text to something descriptive and it will appear across the UI and saved plans.
 - The “Save plan for next time” button writes `.streamlit/last_plan.json`. This file is gitignored; do not check it in or rely on it containing production data.
 
 ## Project Structure & Module Organization

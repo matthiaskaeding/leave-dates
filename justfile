@@ -3,7 +3,8 @@ set shell := ["bash", "-lc"]
 default: run
 
 setup:
-	uv pip install -e .
+    pip install uv
+    uv pip install -r pyproject.toml
 
 run:
 	uv run streamlit run main.py
