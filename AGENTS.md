@@ -3,6 +3,8 @@
 ## Tooling Workflow
 - Manage Python dependencies exclusively with [uv](https://github.com/astral-sh/uv); run `just setup` (alias for `uv pip install -e .`) whenever `pyproject.toml` changes.
 - Use [just](https://github.com/casey/just) to run local commands so every agent follows the same workflow. Consult `justfile` before introducing new scripts.
+- Interval 1 is immutable: it always starts on the birth date, lasts 6 weeks, and must be labeled exactly “Mandatory”. Interval 2 requires user input, Interval 3 is optional, and all durations are whole weeks (later intervals may include optional labels).
+- The “Save plan for next time” button writes `.streamlit/last_plan.json`. This file is gitignored; do not check it in or rely on it containing production data.
 
 ## Project Structure & Module Organization
 `main.py` holds the Streamlit entry point plus supporting helpers. `pyproject.toml` stores metadata and dependencies consumed by uv, while `README.md` documents setup steps. Expand reusable logic inside a `leave_dates/` package as the project grows and mirror each module inside `tests/`. Add visual assets or fixtures under `assets/` and reference them with relative paths to keep Streamlit deployments portable.
@@ -11,6 +13,7 @@
 - `just setup`: installs the project into the active environment via `uv pip install -e .`.
 - `just run`: launches `streamlit run main.py` for local development; use `-server.headless true` if deploying remotely.
 - `just test`: executes `pytest`; append `-- -k overlap` (for example) to forward flags directly to pytest.
+- `just lint`: runs `ruff format --check` and `ruff check --fix` through uv; ensure this passes before raising a PR.
 If new workflows emerge, prefer adding another `just` recipe instead of sharing ad-hoc commands.
 
 ## Coding Style & Naming Conventions
