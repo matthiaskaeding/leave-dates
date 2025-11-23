@@ -15,5 +15,9 @@ The UI asks for:
 
 The chart displays each block, plus any overlap between the parents' leaves, so you can quickly spot coverage gaps or double-coverage opportunities. Custom labels appear everywhere (tooltips, chart legend, and table) once you rename a block.
 
+### Import bank holidays
+- Click **Import bank holidays (.ics)** to upload a calendar file (e.g., public holidays).
+- Each event becomes a “Bank holidays” bar on the timeline so you can see overlaps with your leave plan.
+
 ### Save plans locally
 After entering the intervals, click **Save plan for next time** to store the current inputs in `.streamlit/last_plan.json` (ignored by git). When you reopen the app, the saved plan auto-populates the form. Delete that file if you want to reset the saved values.

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import altair as alt
 import pandas as pd
 import streamlit as st
+from icalendar import Calendar
 
 DEFAULT_INTERVAL_WEEKS = 6
 PLAN_PATH = Path(".streamlit/last_plan.json")
@@ -106,6 +107,63 @@ def save_plan(
     }
     PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
     PLAN_PATH.write_text(json.dumps(payload, indent=2))
+
+
+def parse_bank_holidays(uploaded_file: Optional[st.runtime.uploaded_file_manager.UploadedFile]) -> List[LeaveRecord]:
+    if not uploaded_file:
+        return []
+    try:
+        calendar = Calendar.from_ical(uploaded_file.getvalue())
+    except Exception:
+        st.warning("Unable to read the provided .ics file.")
+        return []
+
+    def _to_date(value: Any) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        return date.today()
+
+    records: List[LeaveRecord] = []
+    for idx, component in enumerate(calendar.walk("VEVENT")):
+        start_component = component.get("dtstart")
+        if not start_component:
+            continue
+        start_date = _to_date(component.decoded("dtstart"))
+
+        end_component = component.get("dtend")
+        if end_component:
+            end_date = _to_date(component.decoded("dtend"))
+            if end_date > start_date:
+                end_date = end_date - timedelta(days=1)
+        else:
+            end_date = start_date
+
+        if end_date < start_date:
+            end_date = start_date
+        duration_weeks = ((end_date - start_date).days + 1) / 7
+        summary = str(component.get("summary", f"Holiday {idx + 1}"))
+        records.append(
+            LeaveRecord(
+                parent="Bank holidays",
+                label=summary,
+                start=start_date,
+                end=end_date,
+                duration_weeks=duration_weeks,
+            )
+        )
+    return records
+
+
+def holiday_date_set(holidays: List[LeaveRecord]) -> set[date]:
+    dates: set[date] = set()
+    for holiday in holidays:
+        current = holiday.start
+        while current <= holiday.end:
+            dates.add(current)
+            current += timedelta(days=1)
+    return dates
 
 
 def collect_interval_inputs(
@@ -268,7 +326,11 @@ def build_overlap_records(
     return overlaps
 
 
-def render_chart(records: List[LeaveRecord]) -> None:
+def render_chart(
+    records: List[LeaveRecord],
+    holidays: List[LeaveRecord],
+    holiday_dates: set[date],
+) -> None:
     if not records:
         st.info("Add at least one leave interval to view the timeline.")
         return
@@ -288,6 +350,16 @@ def render_chart(records: List[LeaveRecord]) -> None:
     )
     df["weeks"] = df["duration_weeks"].apply(lambda value: round(value, 1))
     df["days"] = df["duration_weeks"].apply(duration_weeks_to_days)
+    df["bank_holidays"] = 0
+    if holiday_dates:
+        df["bank_holidays"] = df.apply(
+            lambda row: sum(
+                1
+                for single_date in holiday_dates
+                if row["start"] <= single_date <= row["end_inclusive"]
+            ),
+            axis=1,
+        )
 
     parent_order = df["parent"].unique().tolist()
     used_parents = [p for p in parent_order if p in df["parent"].unique()]
@@ -310,14 +382,37 @@ def render_chart(records: List[LeaveRecord]) -> None:
                 alt.Tooltip("end_inclusive:T", title="End"),
                 alt.Tooltip("weeks:Q", title="Weeks"),
                 alt.Tooltip("days:Q", title="Days"),
+                alt.Tooltip("bank_holidays:Q", title="Holidays"),
             ],
         )
         .properties(height=180)
     )
+    if holidays:
+        holiday_df = pd.DataFrame(
+            [{"date": holiday.start, "label": holiday.label} for holiday in holidays]
+        )
+        min_date = df["start"].min()
+        max_date = df["end_inclusive"].max()
+        holiday_df = holiday_df[
+            (holiday_df["date"] >= min_date) & (holiday_df["date"] <= max_date)
+        ]
+        holiday_layer = (
+            alt.Chart(holiday_df)
+            .mark_rule(color="#f7b267", strokeWidth=1, strokeDash=[3, 3], opacity=0.5)
+            .encode(
+                x=alt.X("date:T"),
+                tooltip=[
+                    alt.Tooltip("label:N", title="Holiday"),
+                    alt.Tooltip("date:T", title="Date"),
+                ],
+            )
+        )
+        chart = chart + holiday_layer
+
     st.altair_chart(chart, use_container_width=True)
-    table_df = df[["label", "start", "end_inclusive", "weeks", "days"]].rename(
-        columns={"end_inclusive": "end"}
-    )
+    table_df = df[
+        ["label", "start", "end_inclusive", "weeks", "days", "bank_holidays"]
+    ].rename(columns={"end_inclusive": "end", "bank_holidays": "holidays"})
     st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
@@ -346,6 +441,15 @@ def main() -> None:
     caregiver_b_name = (
         caregiver_b_input.strip() or "Caregiver 2"
     )
+    holiday_file = st.file_uploader(
+        "Import bank holidays (.ics)", type="ics", accept_multiple_files=False
+    )
+    holiday_records = parse_bank_holidays(holiday_file)
+    holiday_dates = holiday_date_set(holiday_records)
+    if holiday_file and not holiday_records:
+        st.warning("No valid events found in the provided calendar.")
+    elif holiday_records:
+        st.success(f"Imported {len(holiday_records)} bank holiday events.")
     st.divider()
 
     caregiver_a_intervals = collect_interval_inputs(
@@ -368,7 +472,7 @@ def main() -> None:
     all_records = caregiver_a_records + caregiver_b_records + overlap_records
 
     st.divider()
-    render_chart(all_records)
+    render_chart(all_records, holiday_records, holiday_dates)
     if st.button("Save plan for next time"):
         save_plan(
             birth_date,

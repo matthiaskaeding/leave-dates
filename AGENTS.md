@@ -4,6 +4,7 @@
 - Manage Python dependencies exclusively with [uv](https://github.com/astral-sh/uv); use the `uv run` commands directly or the optional `just` recipes.
 - Use [just](https://github.com/casey/just) to run local commands so every agent follows the same workflow. Consult `justfile` before introducing new scripts.
 - All leave blocks are user-defined: the form starts with one editable block per caregiver. Users can rename “Caregiver 1/2” at the top, add or delete blocks via the **Add block** button and each block's delete action, and choose between “Duration” or “End date” modes. Block labels start as “Block N” but should be renamed when helpful; the custom caregiver names propagate throughout the chart/table.
+- Bank holidays are optional: users can upload a `.ics` file, which is parsed with `icalendar`, and those events appear on the timeline under “Bank holidays.” Keep this parser resilient to missing fields.
 - The “Save plan for next time” button writes `.streamlit/last_plan.json`. This file is gitignored; do not check it in or rely on it containing production data.
 
 ## Project Structure & Module Organization

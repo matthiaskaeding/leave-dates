@@ -11,3 +11,6 @@ wheels/
 
 # Local app state (saved plans, Streamlit config)
 .streamlit/
+
+# Local calendar files
+*.ics
