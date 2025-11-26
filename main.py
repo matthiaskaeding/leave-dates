@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
 import altair as alt
 import pandas as pd
@@ -79,12 +80,32 @@ def load_saved_plan() -> Optional[Dict[str, Any]]:
                     return [interval_from_dict(item) for item in raw.get(key, [])]
             return []
 
+        holidays: List[LeaveRecord] = []
+        for entry in raw.get("holidays", []):
+            start = date.fromisoformat(entry["start"])
+            end = date.fromisoformat(entry["end"])
+            duration_weeks = ((end - start).days + 1) / 7
+            holidays.append(
+                LeaveRecord(
+                    parent="Bank holidays",
+                    label=entry.get("label", "Holiday"),
+                    start=start,
+                    end=end,
+                    duration_weeks=duration_weeks,
+                )
+            )
+
         return {
             "birth_date": birth_date,
             "caregiver-a": parse_intervals("caregiver-a", "mother"),
             "caregiver-b": parse_intervals("caregiver-b", "father"),
-            "caregiver_a_name": raw.get("caregiver_a_name", raw.get("mother_name", "Caregiver 1")),
-            "caregiver_b_name": raw.get("caregiver_b_name", raw.get("father_name", "Caregiver 2")),
+            "caregiver_a_name": raw.get(
+                "caregiver_a_name", raw.get("mother_name", "Caregiver 1")
+            ),
+            "caregiver_b_name": raw.get(
+                "caregiver_b_name", raw.get("father_name", "Caregiver 2")
+            ),
+            "holidays": holidays,
         }
     except Exception:
         st.warning("Saved plan could not be read. Starting with defaults.")
@@ -97,6 +118,7 @@ def save_plan(
     caregiver_b_intervals: List[IntervalInput],
     caregiver_a_name: str,
     caregiver_b_name: str,
+    holidays: List[LeaveRecord],
 ) -> None:
     payload = {
         "birth_date": birth_date.isoformat(),
@@ -104,6 +126,14 @@ def save_plan(
         "caregiver-b": [interval.to_dict() for interval in caregiver_b_intervals],
         "caregiver_a_name": caregiver_a_name,
         "caregiver_b_name": caregiver_b_name,
+        "holidays": [
+            {
+                "label": holiday.label,
+                "start": holiday.start.isoformat(),
+                "end": holiday.end.isoformat(),
+            }
+            for holiday in holidays
+        ],
     }
     PLAN_PATH.parent.mkdir(parents=True, exist_ok=True)
     PLAN_PATH.write_text(json.dumps(payload, indent=2))
@@ -156,14 +186,14 @@ def parse_bank_holidays(uploaded_file: Optional[st.runtime.uploaded_file_manager
     return records
 
 
-def holiday_date_set(holidays: List[LeaveRecord]) -> set[date]:
-    dates: set[date] = set()
+def holiday_lookup(holidays: List[LeaveRecord]) -> Dict[date, List[str]]:
+    lookup: Dict[date, List[str]] = defaultdict(list)
     for holiday in holidays:
         current = holiday.start
         while current <= holiday.end:
-            dates.add(current)
+            lookup[current].append(holiday.label)
             current += timedelta(days=1)
-    return dates
+    return lookup
 
 
 def collect_interval_inputs(
@@ -329,7 +359,7 @@ def build_overlap_records(
 def render_chart(
     records: List[LeaveRecord],
     holidays: List[LeaveRecord],
-    holiday_dates: set[date],
+    holiday_lookup_map: Dict[date, List[str]],
 ) -> None:
     if not records:
         st.info("Add at least one leave interval to view the timeline.")
@@ -350,16 +380,31 @@ def render_chart(
     )
     df["weeks"] = df["duration_weeks"].apply(lambda value: round(value, 1))
     df["days"] = df["duration_weeks"].apply(duration_weeks_to_days)
-    df["bank_holidays"] = 0
-    if holiday_dates:
-        df["bank_holidays"] = df.apply(
-            lambda row: sum(
-                1
-                for single_date in holiday_dates
-                if row["start"] <= single_date <= row["end_inclusive"]
-            ),
-            axis=1,
-        )
+
+    def labels_for_block(row: pd.Series) -> List[str]:
+        labels: set[str] = set()
+        current = row["start"]
+        while current <= row["end_inclusive"]:
+            for label in holiday_lookup_map.get(current, []):
+                labels.add(label)
+            current += timedelta(days=1)
+        return sorted(labels)
+
+    def dates_for_block(row: pd.Series) -> List[str]:
+        dates: List[date] = []
+        current = row["start"]
+        while current <= row["end_inclusive"]:
+            if holiday_lookup_map.get(current):
+                dates.append(current)
+            current += timedelta(days=1)
+        unique_dates = sorted(set(dates))
+        return [d.isoformat() for d in unique_dates]
+
+    df["holiday_dates"] = df.apply(dates_for_block, axis=1)
+    df["holiday_count"] = df["holiday_dates"].apply(len)
+    df["holiday_dates_display"] = df["holiday_dates"].apply(
+        lambda dates: ", ".join(dates) if dates else "None"
+    )
 
     parent_order = df["parent"].unique().tolist()
     used_parents = [p for p in parent_order if p in df["parent"].unique()]
@@ -368,7 +413,7 @@ def render_chart(
         range=["#8fb339", "#3f88c5", "#f26419"][: len(used_parents)],
     )
 
-    chart = (
+    base_chart = (
         alt.Chart(df)
         .mark_bar(cornerRadius=4)
         .encode(
@@ -382,7 +427,8 @@ def render_chart(
                 alt.Tooltip("end_inclusive:T", title="End"),
                 alt.Tooltip("weeks:Q", title="Weeks"),
                 alt.Tooltip("days:Q", title="Days"),
-                alt.Tooltip("bank_holidays:Q", title="Holidays"),
+                alt.Tooltip("holiday_count:Q", title="Holidays"),
+                alt.Tooltip("holiday_dates_display:N", title="Holiday dates"),
             ],
         )
         .properties(height=180)
@@ -396,23 +442,51 @@ def render_chart(
         holiday_df = holiday_df[
             (holiday_df["date"] >= min_date) & (holiday_df["date"] <= max_date)
         ]
+        block_ranges = df[["label", "start", "end_inclusive"]]
+
+        def coverage_for(date_value: date) -> str:
+            matches = block_ranges[
+                (block_ranges["start"] <= date_value)
+                & (block_ranges["end_inclusive"] >= date_value)
+            ]["label"].tolist()
+            return ", ".join(matches) if matches else "None"
+
+        holiday_df["covered_blocks"] = holiday_df["date"].apply(coverage_for)
+
         holiday_layer = (
             alt.Chart(holiday_df)
-            .mark_rule(color="#f7b267", strokeWidth=1, strokeDash=[3, 3], opacity=0.5)
+            .mark_rule(color="#f4d35e", strokeWidth=1, strokeDash=[4, 2], opacity=0.35)
             .encode(
                 x=alt.X("date:T"),
                 tooltip=[
                     alt.Tooltip("label:N", title="Holiday"),
                     alt.Tooltip("date:T", title="Date"),
+                    alt.Tooltip("covered_blocks:N", title="Within blocks"),
                 ],
             )
         )
-        chart = chart + holiday_layer
+        chart = alt.layer(holiday_layer, base_chart)
+    else:
+        chart = base_chart
 
     st.altair_chart(chart, use_container_width=True)
     table_df = df[
-        ["label", "start", "end_inclusive", "weeks", "days", "bank_holidays"]
-    ].rename(columns={"end_inclusive": "end", "bank_holidays": "holidays"})
+        [
+            "label",
+            "start",
+            "end_inclusive",
+            "weeks",
+            "days",
+            "holiday_count",
+            "holiday_dates_display",
+        ]
+    ].rename(
+        columns={
+            "end_inclusive": "end",
+            "holiday_count": "holidays",
+            "holiday_dates_display": "holiday dates",
+        }
+    )
     st.dataframe(table_df, use_container_width=True, hide_index=True)
 
 
@@ -441,15 +515,24 @@ def main() -> None:
     caregiver_b_name = (
         caregiver_b_input.strip() or "Caregiver 2"
     )
+    stored_holidays = saved_plan.get("holidays", []) if saved_plan else []
     holiday_file = st.file_uploader(
         "Import bank holidays (.ics)", type="ics", accept_multiple_files=False
     )
-    holiday_records = parse_bank_holidays(holiday_file)
-    holiday_dates = holiday_date_set(holiday_records)
-    if holiday_file and not holiday_records:
-        st.warning("No valid events found in the provided calendar.")
-    elif holiday_records:
-        st.success(f"Imported {len(holiday_records)} bank holiday events.")
+    uploaded_holidays = parse_bank_holidays(holiday_file)
+    if holiday_file:
+        holidays = uploaded_holidays
+    else:
+        holidays = stored_holidays
+
+    holiday_lookup_map = holiday_lookup(holidays)
+    if holiday_file:
+        if not uploaded_holidays:
+            st.warning("No valid events found in the provided calendar.")
+        else:
+            st.success(f"Imported {len(uploaded_holidays)} bank holiday events.")
+    elif holidays:
+        st.info(f"Loaded {len(holidays)} stored bank holiday events.")
     st.divider()
 
     caregiver_a_intervals = collect_interval_inputs(
@@ -472,7 +555,7 @@ def main() -> None:
     all_records = caregiver_a_records + caregiver_b_records + overlap_records
 
     st.divider()
-    render_chart(all_records, holiday_records, holiday_dates)
+    render_chart(all_records, holidays, holiday_lookup_map)
     if st.button("Save plan for next time"):
         save_plan(
             birth_date,
@@ -480,6 +563,7 @@ def main() -> None:
             caregiver_b_intervals,
             caregiver_a_name,
             caregiver_b_name,
+            holidays,
         )
         st.success("Plan saved locally (.streamlit/last_plan.json).")
 
