@@ -50,6 +50,16 @@ def compute_inclusive_end(start: date, duration_weeks: float) -> date:
     return start + timedelta(days=total_days - 1)
 
 
+def add_working_days(start: date, working_days: int) -> date:
+    current = start
+    days_added = 0
+    while days_added < working_days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:  # Monday=0, Sunday=6
+            days_added += 1
+    return current
+
+
 def rerun_app() -> None:
     rerun_fn = getattr(st, "rerun", None)
     if callable(rerun_fn):
@@ -258,11 +268,11 @@ def collect_interval_inputs(
             and not float(saved_interval.duration_weeks).is_integer()
         ):
             mode_index = 1
-        cols = st.columns(2)
+        cols = st.columns(3)
         with cols[0]:
             mode = st.radio(
                 "Specify by",
-                ["Duration", "End date"],
+                ["Duration", "End date", "Working days"],
                 key=f"{key_prefix}-mode-{interval_number}",
                 horizontal=True,
                 index=mode_index,
@@ -277,9 +287,12 @@ def collect_interval_inputs(
                     key=f"{key_prefix}-duration-{interval_number}",
                 )
                 interval_duration = float(duration_value)
-            else:
+                interval_end = compute_inclusive_end(interval_start, interval_duration)
+            elif mode == "End date":
                 saved_end = (
-                    compute_inclusive_end(saved_interval.start_date, saved_interval.duration_weeks)
+                    compute_inclusive_end(
+                        saved_interval.start_date, saved_interval.duration_weeks
+                    )
                     if saved_interval
                     else compute_inclusive_end(
                         interval_start,
@@ -295,6 +308,16 @@ def collect_interval_inputs(
                 interval_duration = max(
                     ((interval_end - interval_start).days + 1) / 7, 0.0
                 )
+            else:
+                working_days = st.number_input(
+                    "Working days",
+                    min_value=0,
+                    step=1,
+                    value=5,
+                    key=f"{key_prefix}-working-days-{interval_number}",
+                )
+                interval_end = add_working_days(interval_start, int(working_days))
+                interval_duration = ((interval_end - interval_start).days + 1) / 7
         if len(blocks_state) > 1:
             if st.button(
                 f"Delete block {interval_number}",
@@ -455,7 +478,7 @@ def render_chart(
 
         holiday_layer = (
             alt.Chart(holiday_df)
-            .mark_rule(color="#f4d35e", strokeWidth=1, strokeDash=[4, 2], opacity=0.35)
+            .mark_rule(color="#d90429", strokeWidth=2, strokeDash=[6, 3], opacity=0.8)
             .encode(
                 x=alt.X("date:T"),
                 tooltip=[

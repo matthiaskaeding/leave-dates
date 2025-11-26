@@ -11,7 +11,7 @@ uv run streamlit run main.py
 The UI asks for:
 1. Newborn birth date.
 2. Caregiver names: enter the two people who will take leave (defaults provided for quick experiments).
-3. Caregiver plans: each caregiver gets an independent block planner. Use **Add block** to append as many leave blocks as required. Each block defaults to starting on the newborn’s birth date (or immediately after the previous block) and can be defined via a whole-week duration or an explicit end date. Every block label starts as “Block N,” but you can edit it inline to something descriptive (e.g., “Vacation”).
+3. Caregiver plans: each caregiver gets an independent block planner. Use **Add block** to append as many leave blocks as required. Each block defaults to starting on the newborn’s birth date (or immediately after the previous block) and can be defined via a whole-week duration, a precise end date, or a working-days count. Every block label starts as “Block N,” but you can edit it inline to something descriptive (e.g., “Vacation”).
 
 The chart displays each block, plus any overlap between the parents' leaves, so you can quickly spot coverage gaps or double-coverage opportunities. Custom labels appear everywhere (tooltips, chart legend, and table) once you rename a block.
 
